@@ -1,0 +1,9 @@
+# Build intermediates. bin\ is deliberately NOT ignored: the built HideBootcampTrayUtility.exe is
+# committed so the target machines, which have no toolchain, can just run it.
+obj/
+*.pdb
+*.suo
+*.user
+
+# Claude Code local session settings, not part of the project.
+.claude/

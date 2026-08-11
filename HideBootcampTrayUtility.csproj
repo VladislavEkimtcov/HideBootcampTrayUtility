@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Legacy (non-SDK-style) project on purpose: SDK-style projects require the .NET SDK,
+  which is not present on a Windows IoT Enterprise LTSC image. This builds with the
+  in-box MSBuild 4.0 at %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe.
+
+  MSB3644 ("reference assemblies not found") is expected here and is not an error:
+  with no targeting packs installed, MSBuild resolves references from the GAC instead.
+-->
+<Project ToolsVersion="4.0" DefaultTargets="Build"
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <OutputType>WinExe</OutputType>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <RootNamespace>HideBootcampTrayUtility</RootNamespace>
+    <AssemblyName>HideBootcampTrayUtility</AssemblyName>
+    <OutputPath>bin\</OutputPath>
+    <IntermediateOutputPath>obj\</IntermediateOutputPath>
+    <ApplicationManifest>src\app.manifest</ApplicationManifest>
+    <ApplicationIcon>src\app.ico</ApplicationIcon>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Optimize>true</Optimize>
+    <WarningLevel>4</WarningLevel>
+    <!-- Sources are UTF-8 without a BOM; csc would otherwise read them as system ANSI. -->
+    <CodePage>65001</CodePage>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <AutoUnifyAssemblyReferences>true</AutoUnifyAssemblyReferences>
+    <!--
+      Silences MSB3270: an AnyCPU assembly resolving mscorlib from the 64-bit GAC is
+      exactly what is expected here, and there is no 32-bit reference assembly to point
+      at instead.
+    -->
+    <ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>None</ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Private=False on every framework reference. Without targeting packs these resolve to
+      the GAC copies, which MSBuild would otherwise treat as copy-local and drop next to
+      the exe (mscorlib.dll alone is 5 MB, plus the .nlp tables). The point of this build
+      is one self-contained file, so they are all marked non-private.
+    -->
+    <Reference Include="mscorlib">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Core">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Drawing">
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Windows.Forms">
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="src\Program.cs" />
+    <Compile Include="src\HiderContext.cs" />
+    <Compile Include="src\SettingsForm.cs" />
+    <Compile Include="src\Settings.cs" />
+    <Compile Include="src\AutoStart.cs" />
+    <Compile Include="src\BootCamp.cs" />
+    <Compile Include="src\StartupApproval.cs" />
+    <Compile Include="src\DriverInit.cs" />
+    <Compile Include="src\HotkeyWorker.cs" />
+    <Compile Include="src\Backlight.cs" />
+    <Compile Include="src\BacklightIdle.cs" />
+    <Compile Include="src\MessageSink.cs" />
+    <Compile Include="src\NativeMethods.cs" />
+    <Compile Include="src\SingleInstance.cs" />
+    <Compile Include="src\Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
