@@ -1,49 +1,25 @@
 # Boot Camp Tray Hider
 
-Replaces Apple's Boot Camp tray utility on a Windows MacBook with a background program
+Get rid of Apple's Boot Camp tray utility/icon on a Windows MacBook with a background program
 that has no tray icon and no window of its own.
 
-The tray utility does two quite different jobs, and both have to be taken over:
+Based on Claude's reverse-engineering of Bootcamp. Successfully emulates two key jobs of Apple's tray utility:
 
-**Settings it pushes into the drivers once, at logon.** Without them the trackpad has no
-tap to click, no secondary tap and no scrolling, and F1/F2 do nothing to the display
-brightness. Nothing has to stay running afterwards — the drivers keep the settings until
-they are reloaded.
+\* init drivers with own settings
+\* hotkeys
 
-**Hotkeys it sits and waits for.** Five keys have nothing behind them but a listening
-program:
-
-| Key | What it does |
-| --- | --- |
-| F5 / F6 | keyboard backlight down / up |
-| F10 / F11 / F12 | mute / volume down / volume up |
-
-It also fades the keyboard backlight out when the machine is left alone, which this
-program now does too.
+All to avoid a gray square you didn't ask for (but need).
 
 ## Using it
 
-Run `bin\HideBootcampTrayUtility.exe`. The settings window has three checkboxes; hover any of them
-for an explanation.
+Run `bin\HideBootcampTrayUtility.exe`, pick your settings.
 
-- **Enabled** — take over from Boot Camp. Applies the driver settings, ends `Bootcamp.exe`
-  and keeps this program running in the background after the window closes. Unticked, the
+- **Enabled** — take over from Boot Camp. Works its magic in the background after the window closes. Unticked, the
   program exits when you close it.
-- **Auto-start this hider** — adds it to Task Manager's Startup tab (the per-user `Run`
-  key) so it starts silently at logon. No administrator rights needed.
-- **Disable Boot Camp autostart** — switches off Apple's own `Apple_KbdMgr` startup entry
-  using the same mechanism as Task Manager's Startup tab. Boot Camp's entry is
-  machine-wide, so Windows asks for administrator approval when you close the window.
-  The entry is disabled, not deleted, and can be switched back on here or in Task Manager.
+- **Auto-start this hider** — add it to Task Manager's Startup tab.
+- **Disable Boot Camp autostart** — not have Apple's tray utility auto-launch.
 
-Settings are saved when you close the window — that is the only gesture there is.
-
-Once it is running with no window, launching the executable again brings its settings back
-rather than starting a second copy.
-
-The trackpad and keyboard settings themselves are still Apple's to edit: use the Boot Camp
-control panel for those. This program reads what it left behind and pushes it to the
-drivers, which is all the tray utility was doing with them.
+Settings are saved when you close the window.
 
 ## Building
 
@@ -51,17 +27,9 @@ drivers, which is all the tray utility was doing with them.
 build.cmd
 ```
 
-No .NET SDK, no Visual Studio, no NuGet: this builds with the MSBuild and C# compiler that
-ship inside Windows itself, at `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319`. That is
-deliberate — the target is a Windows IoT Enterprise LTSC image with no toolchain on it, so
-the program is a single .NET Framework 4.8 executable that runs on the image as delivered.
-The `MSB3644` warning about missing reference assemblies is expected and harmless; with no
-targeting packs installed MSBuild resolves the references from the GAC instead.
+Be amazed as it builds without downloading half the Internet, as it's C#5!
 
-Because the compiler is the in-box one, the sources are **C# 5**: no string interpolation,
-no `?.`, no `nameof`, no expression-bodied members.
-
-## How it works
+## Clause the hacker's writeup that you can skip like humans normally do
 
 Recovered from `Bootcamp.exe` with x64dbg, driving its `headless.exe` from a script with
 non-breaking logging breakpoints on `DeviceIoControl`, `CreateFileW` and
