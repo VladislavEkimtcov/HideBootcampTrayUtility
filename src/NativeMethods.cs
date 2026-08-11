@@ -303,5 +303,54 @@ namespace HideBootcampTrayUtility
                 UnregisterDeviceNotification(handle);
             }
         }
+
+        // ---- Reaching the real System32 from a 32-bit process ------------------------
+        //
+        // MSBuild builds an AnyCPU executable as Prefer32Bit, so this program runs under
+        // WOW64 and everything it asks for in System32 is answered from SysWOW64 instead.
+        // Apple's control panel is installed only in the real System32, so the two calls
+        // that go looking for it have to switch the redirector off first. See BootCamp.
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool Wow64DisableWow64FsRedirection(out IntPtr oldValue);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool Wow64RevertWow64FsRedirection(IntPtr oldValue);
+
+        /// <summary>
+        /// Turns the WOW64 file-system redirector off for this thread until it is disposed.
+        ///
+        /// It has to be a narrow scope. While it is open a 32-bit process that loads a DLL
+        /// out of System32 by name gets the 64-bit copy and fails, so nothing but the one
+        /// call being protected belongs inside it. The revert is per-thread, which is why
+        /// the whole thing is confined to the UI thread.
+        ///
+        /// On 64-bit Windows the calls below both succeed; on 32-bit Windows they fail and
+        /// there is nothing to undo, which is what Wow64Redirection.Off leaves behind.
+        /// </summary>
+        public sealed class Wow64Redirection : IDisposable
+        {
+            private IntPtr _oldValue;
+            private bool _disabled;
+
+            private Wow64Redirection()
+            {
+                _disabled = Wow64DisableWow64FsRedirection(out _oldValue);
+            }
+
+            public static Wow64Redirection Off()
+            {
+                return new Wow64Redirection();
+            }
+
+            public void Dispose()
+            {
+                if (_disabled)
+                {
+                    _disabled = false;
+                    Wow64RevertWow64FsRedirection(_oldValue);
+                }
+            }
+        }
     }
 }

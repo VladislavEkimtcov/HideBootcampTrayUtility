@@ -1,13 +1,15 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using Microsoft.Win32;
 
 namespace HideBootcampTrayUtility
 {
     /// <summary>
-    /// The two things this program does *to* Apple's Boot Camp tray utility: end it, and
-    /// stop it coming back at the next logon.
+    /// Everything this program does *to* Apple's Boot Camp: end the tray utility, stop it
+    /// coming back at the next logon, start it again if it is wanted back, and open the
+    /// control panel Apple leaves out of the Start menu.
     ///
     /// Ending it needs no special rights -- it runs as the logged-on user, and so do we.
     /// Its autostart is a different matter: Boot Camp installs a machine-wide Run entry,
@@ -24,6 +26,18 @@ namespace HideBootcampTrayUtility
     {
         /// <summary>Bootcamp.exe, without the extension -- what Process reports.</summary>
         private const string TrayProcessName = "Bootcamp";
+
+        /// <summary>Where Boot Camp installs, when its Run entry is no help.</summary>
+        private const string TrayFallbackFolder = "Boot Camp";
+        private const string TrayFileName = "Bootcamp.exe";
+
+        /// <summary>
+        /// The Boot Camp control panel: the trackpad, keyboard and backlight settings
+        /// themselves. It lives in System32 under this name and nowhere else -- there is no
+        /// .cpl and no Start menu entry, and the only way in that Apple ships is the tray
+        /// icon's context menu, which is exactly what this program takes away.
+        /// </summary>
+        private const string ControlPanelFileName = "AppleControlPanel.exe";
 
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -87,8 +101,218 @@ namespace HideBootcampTrayUtility
             }
         }
 
-        /// <summary>Whether Boot Camp installed a machine-wide autostart entry at all.</summary>
-        public static bool HasStartupEntry()
+        /// <summary>Whether Apple's tray utility is running right now.</summary>
+        public static bool IsTrayUtilityRunning()
+        {
+            Process[] processes;
+            try
+            {
+                processes = Process.GetProcessesByName(TrayProcessName);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            foreach (Process process in processes)
+            {
+                process.Dispose();
+            }
+            return processes.Length > 0;
+        }
+
+        /// <summary>
+        /// Full path of the Boot Camp control panel: the real System32 copy, which is the
+        /// only one there is.
+        ///
+        /// MSBuild builds this AnyCPU executable as Prefer32Bit, so it runs under WOW64 and
+        /// asking for System32 gets SysWOW64, where Apple installs nothing. Both the
+        /// existence check and the launch therefore run with the redirector switched off.
+        ///
+        /// The obvious alternative, the "Sysnative" alias, gets as far as File.Exists and
+        /// then fails: the control panel's manifest asks for highestAvailable, so an
+        /// administrator's copy is started by the elevation service, and that service is a
+        /// different process, for which Sysnative means nothing. ShellExecute comes back
+        /// with ERROR_PATH_NOT_FOUND.
+        /// </summary>
+        public static string ControlPanelPath
+        {
+            get
+            {
+                return Path.Combine(
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                        "System32"),
+                    ControlPanelFileName);
+            }
+        }
+
+        /// <summary>
+        /// Full path of Apple's tray utility, taken from the Run entry that starts it --
+        /// the one place the installer records where it put itself. Falls back to the
+        /// default install folder when the entry has been deleted rather than disabled.
+        /// </summary>
+        public static string TrayUtilityPath
+        {
+            get
+            {
+                string fromRunEntry = TrayUtilityPathFromRunEntry();
+                if (fromRunEntry != null)
+                {
+                    return fromRunEntry;
+                }
+
+                return Path.Combine(Path.Combine(ProgramFilesDirectory, TrayFallbackFolder),
+                    TrayFileName);
+            }
+        }
+
+        /// <summary>
+        /// The 64-bit Program Files, not the (x86) one this 32-bit process is otherwise
+        /// handed: Boot Camp is a 64-bit install. ProgramW6432 is set for processes of
+        /// either bitness on 64-bit Windows, and absent on 32-bit Windows, where the plain
+        /// folder is already the right one.
+        /// </summary>
+        private static string ProgramFilesDirectory
+        {
+            get
+            {
+                string native = Environment.GetEnvironmentVariable("ProgramW6432");
+                if (!string.IsNullOrEmpty(native))
+                {
+                    return native;
+                }
+                return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            }
+        }
+
+        /// <summary>
+        /// Where Boot Camp's own Run entry says it is, or null if that leads nowhere.
+        ///
+        /// Apple writes the path unquoted, spaces and all, so the entry has to be tried
+        /// whole before it is split on the first space -- otherwise the standard reading of
+        /// a Run command finds only "C:\Program".
+        /// </summary>
+        private static string TrayUtilityPathFromRunEntry()
+        {
+            string command = ReadRunCommand();
+            if (string.IsNullOrEmpty(command))
+            {
+                return null;
+            }
+
+            string whole = command.Trim();
+            if (SafeExists(whole))
+            {
+                return whole;
+            }
+
+            string path = AutoStart.ExtractExecutable(command);
+            if (!string.IsNullOrEmpty(path) && SafeExists(path))
+            {
+                return path;
+            }
+            return null;
+        }
+
+        public static bool HasControlPanel()
+        {
+            using (NativeMethods.Wow64Redirection.Off())
+            {
+                return SafeExists(ControlPanelPath);
+            }
+        }
+
+        public static bool HasTrayUtility()
+        {
+            return SafeExists(TrayUtilityPath);
+        }
+
+        /// <summary>
+        /// Opens the Boot Camp control panel.
+        ///
+        /// Its manifest asks for highestAvailable, so on an administrator's account Windows
+        /// puts up a UAC prompt -- which means the shell has to do the starting. Started
+        /// any other way it fails outright with ERROR_ELEVATION_REQUIRED. On a standard
+        /// account highestAvailable is just asInvoker and nothing is asked.
+        /// </summary>
+        public static ChangeResult OpenControlPanel()
+        {
+            // No working directory: it is a System32 program with nothing beside it, and
+            // handing the shell a redirected directory would only reintroduce the problem
+            // the scope below exists to avoid.
+            using (NativeMethods.Wow64Redirection.Off())
+            {
+                if (!SafeExists(ControlPanelPath))
+                {
+                    return ChangeResult.Failed;
+                }
+                return Launch(ControlPanelPath, null);
+            }
+        }
+
+        /// <summary>
+        /// Starts Apple's tray utility again, for someone who wants it back. It is
+        /// asInvoker, so this raises no prompt.
+        /// </summary>
+        public static ChangeResult StartTrayUtility()
+        {
+            if (!HasTrayUtility())
+            {
+                return ChangeResult.Failed;
+            }
+            string path = TrayUtilityPath;
+            // Its localised strings live in Boot Camp.Resources, beside the executable.
+            return Launch(path, Path.GetDirectoryName(path));
+        }
+
+        /// <summary>
+        /// Starts one of Apple's programs and does not wait for it: both of them are
+        /// windows the user is about to work in, not helpers with an answer to give.
+        /// </summary>
+        private static ChangeResult Launch(string path, string workingDirectory)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(path);
+            start.UseShellExecute = true;
+            if (!string.IsNullOrEmpty(workingDirectory))
+            {
+                start.WorkingDirectory = workingDirectory;
+            }
+
+            try
+            {
+                Process started = Process.Start(start);
+                if (started != null)
+                {
+                    started.Dispose();
+                }
+                return ChangeResult.Changed;
+            }
+            catch (Win32Exception ex)
+            {
+                return ex.NativeErrorCode == ErrorCancelled
+                    ? ChangeResult.Cancelled
+                    : ChangeResult.Failed;
+            }
+            catch (Exception)
+            {
+                return ChangeResult.Failed;
+            }
+        }
+
+        private static bool SafeExists(string path)
+        {
+            try
+            {
+                return File.Exists(path);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>The command line Boot Camp's own Run entry holds, or null.</summary>
+        private static string ReadRunCommand()
         {
             try
             {
@@ -96,13 +320,19 @@ namespace HideBootcampTrayUtility
                            RegistryView.Registry64))
                 using (RegistryKey key = root.OpenSubKey(RunKeyPath, false))
                 {
-                    return key != null && key.GetValue(RunValueName) != null;
+                    return key == null ? null : key.GetValue(RunValueName) as string;
                 }
             }
             catch (Exception)
             {
-                return false;
+                return null;
             }
+        }
+
+        /// <summary>Whether Boot Camp installed a machine-wide autostart entry at all.</summary>
+        public static bool HasStartupEntry()
+        {
+            return !string.IsNullOrEmpty(ReadRunCommand());
         }
 
         /// <summary>

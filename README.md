@@ -3,6 +3,8 @@
 Get rid of Apple's Boot Camp tray utility/icon on a Windows MacBook with a background program
 that has no tray icon and no window of its own.
 
+![Settings window](docs/screenshot.png)
+
 Based on Claude's reverse-engineering of Bootcamp. Successfully emulates two key jobs of Apple's tray utility:
 
 \* init drivers with own settings
@@ -20,6 +22,18 @@ Run `bin\HideBootcampTrayUtility.exe`, pick your settings.
 - **Disable Boot Camp autostart** — not have Apple's tray utility auto-launch.
 
 Settings are saved when you close the window.
+
+Three buttons below them, for Apple's own programs. These act when pressed — they are not
+settings, so there is nothing to save:
+
+- **Open Control Panel** — the Boot Camp Control Panel, which is where you actually set the
+  trackpad, keyboard and backlight settings this program then pushes to the drivers. Apple
+  puts no Start menu entry on it and no `.cpl`: the only door it ships is the tray icon's
+  right-click menu, and this program's whole job is getting rid of that icon. Windows asks
+  for administrator approval, because Apple's manifest does.
+- **Start tray utility** — puts Apple's `Bootcamp.exe` back, if you want it back.
+- **Stop tray utility** — ends it. Apple gives it no exit command, no close, no quit, so
+  this is the only way out short of Task Manager.
 
 ## Building
 
@@ -85,6 +99,35 @@ is not used for" slider, in milliseconds. `Bootcamp.exe` imports `GetLastInputIn
 `SetTimer` and installs no input hook, so it polls; so does this. The fade deliberately
 does not write `Light Value` — that is the level the user chose, not the level the room is
 in — so the light comes back where they left it.
+
+### Reaching the control panel (`BootCamp`)
+
+Two Apple binaries, not one:
+
+| Binary | Manifest | What it is |
+| --- | --- | --- |
+| `C:\Program Files\Boot Camp\Bootcamp.exe` | `asInvoker` | the tray utility; `HKLM\...\Run\Apple_KbdMgr` starts it, unquoted path and all |
+| `C:\Windows\System32\AppleControlPanel.exe` | `highestAvailable` | the settings UI; imports no `Shell_NotifyIcon`, so it really does just close |
+
+Starting the control panel took two goes to get right, and both failures are worth writing
+down.
+
+MSBuild compiles an `AnyCPU` executable as `Prefer32Bit` unless told otherwise, so this
+program runs under WOW64 and every path it asks for in `System32` is answered from
+`SysWOW64` — where Apple installs nothing. The build is left 32-bit deliberately: the
+driver IOCTL buffers were proven at that width.
+
+The documented way out is the `Sysnative` alias, and it half works. `File.Exists` on
+`C:\Windows\Sysnative\AppleControlPanel.exe` is true, and `CreateProcess` on it fails with
+`ERROR_ELEVATION_REQUIRED` (740) — which proves the path resolved. But `ShellExecute`, the
+one call that *can* elevate, comes back with `ERROR_PATH_NOT_FOUND` (3): a `highestAvailable`
+program is started for you by the elevation service, that service is a different process,
+and `Sysnative` is an alias only the calling process has.
+
+So the launch has to name the real `C:\Windows\System32` path and switch the redirector off
+around it with `Wow64DisableWow64FsRedirection`. That scope is kept to the one call — while
+it is open, a 32-bit process loading a DLL by name out of `System32` would get the 64-bit
+copy and fail.
 
 ### What is not implemented: "Adjust in Low Light"
 

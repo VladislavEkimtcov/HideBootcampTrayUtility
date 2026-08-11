@@ -108,9 +108,10 @@ namespace HideBootcampTrayUtility
 
         /// <summary>
         /// Pulls the executable path out of a Run command line, which is the quoted path
-        /// followed by this program's own switches.
+        /// followed by this program's own switches. Shared with BootCamp, which has to read
+        /// Apple's Run entry the same way to find where Boot Camp was installed.
         /// </summary>
-        private static string ExtractExecutable(string command)
+        internal static string ExtractExecutable(string command)
         {
             string trimmed = command.Trim();
             if (trimmed.Length > 0 && trimmed[0] == '"')
