@@ -7,8 +7,8 @@ that has no tray icon and no window of its own.
 
 Based on Claude's reverse-engineering of Bootcamp. Successfully emulates two key jobs of Apple's tray utility:
 
-\* init drivers with own settings
-\* hotkeys
+* init drivers with settings
+* hotkey handling
 
 All to avoid a gray square you didn't ask for (but need).
 
