@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using Microsoft.Win32;
 
 namespace HideBootcampTrayUtility
 {
@@ -12,23 +13,47 @@ namespace HideBootcampTrayUtility
     /// be fighting over the same five hotkey registrations with no sign of it on screen.
     /// Instead the second process signals the first and exits, and the first brings its
     /// settings window up.
+    ///
+    /// Being resident is also what makes --flash worth having, so the same channel carries
+    /// flash requests. Those need a payload, which a bare event cannot hold, so the request
+    /// is left in an HKCU value and the event only says "there is one waiting". HKCU is
+    /// already this program's storage and is scoped to the logon session by construction,
+    /// which is the same scope as the "Local\" objects below -- a named pipe would have
+    /// needed an ACL to say the same thing.
     /// </summary>
     internal sealed class SingleInstance : IDisposable
     {
-        // "Local\" scopes both objects to the logon session, so two users on the same
+        // "Local\" scopes all three objects to the logon session, so two users on the same
         // machine each get their own hider -- which is right, because each user has their
         // own backlight level and their own volume.
         private const string MutexName = @"Local\HideBootcampTrayUtility.SingleInstance";
         private const string SignalName = @"Local\HideBootcampTrayUtility.ShowSettings";
+        private const string FlashSignalName = @"Local\HideBootcampTrayUtility.Flash";
+
+        private const string KeyPath = @"Software\HideBootcampTrayUtility";
+        private const string FlashRequestValueName = "FlashRequest";
+
+        /// <summary>
+        /// What the slot holds to mean "stop flashing". A word rather than an empty value so
+        /// a half-written slot can never read as a cancellation.
+        /// </summary>
+        private const string StopRequest = "stop";
 
         private Mutex _mutex;
         private bool _owned;
         private EventWaitHandle _showSettingsSignal;
+        private EventWaitHandle _flashSignal;
         private EventWaitHandle _stopSignal;
         private Thread _listener;
 
         /// <summary>Raised on a background thread when another launch asks for the window.</summary>
         public event EventHandler ShowSettingsRequested;
+
+        /// <summary>
+        /// Raised on the listener thread when another launch asks for a flash. The argument
+        /// is null for "--flash-stop". Handlers must not touch the UI without posting to it.
+        /// </summary>
+        public event EventHandler<FlashRequestedEventArgs> FlashRequested;
 
         /// <summary>
         /// True if this process is the first instance. When false the caller should signal
@@ -50,6 +75,7 @@ namespace HideBootcampTrayUtility
             _owned = true;
 
             _showSettingsSignal = new EventWaitHandle(false, EventResetMode.AutoReset, SignalName);
+            _flashSignal = new EventWaitHandle(false, EventResetMode.AutoReset, FlashSignalName);
             _stopSignal = new EventWaitHandle(false, EventResetMode.ManualReset);
 
             _listener = new Thread(Listen);
@@ -74,21 +100,124 @@ namespace HideBootcampTrayUtility
             }
         }
 
+        /// <summary>
+        /// Asks the already-running instance to flash, or -- with a null request -- to stop
+        /// flashing. The request is written before the event is set, so the listener never
+        /// wakes to find a slot that has not been filled in yet.
+        /// </summary>
+        /// <returns>False if there was nobody listening, so the caller can flash itself.</returns>
+        public static bool TrySignalFlash(FlashRequest request)
+        {
+            EventWaitHandle signal;
+            if (!EventWaitHandle.TryOpenExisting(FlashSignalName, out signal))
+            {
+                return false;
+            }
+
+            using (signal)
+            {
+                if (!WriteFlashRequest(request == null ? StopRequest : request.ToWire()))
+                {
+                    return false;
+                }
+                signal.Set();
+                return true;
+            }
+        }
+
+        private static bool WriteFlashRequest(string wire)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(KeyPath))
+                {
+                    if (key == null)
+                    {
+                        return false;
+                    }
+                    key.SetValue(FlashRequestValueName, wire, RegistryValueKind.String);
+                    return true;
+                }
+            }
+            catch (Exception)
+            {
+                // A write filter on an industrial image, most likely. Reporting it as "no
+                // instance" sends the caller down the cold-start path, which still flashes.
+                return false;
+            }
+        }
+
+        private static string ReadFlashRequest()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(KeyPath, false))
+                {
+                    if (key == null)
+                    {
+                        return null;
+                    }
+                    return key.GetValue(FlashRequestValueName) as string;
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private void Listen()
         {
-            WaitHandle[] handles = new WaitHandle[] { _showSettingsSignal, _stopSignal };
+            WaitHandle[] handles = new WaitHandle[] { _showSettingsSignal, _flashSignal, _stopSignal };
             while (true)
             {
                 int index = WaitHandle.WaitAny(handles);
-                if (index != 0)
+                if (index == 0)
                 {
-                    return;
+                    EventHandler handler = ShowSettingsRequested;
+                    if (handler != null)
+                    {
+                        handler(this, EventArgs.Empty);
+                    }
+                    continue;
                 }
-                EventHandler handler = ShowSettingsRequested;
-                if (handler != null)
+
+                if (index == 1)
                 {
-                    handler(this, EventArgs.Empty);
+                    RaiseFlashRequested();
+                    continue;
                 }
+
+                return;
+            }
+        }
+
+        private void RaiseFlashRequested()
+        {
+            EventHandler<FlashRequestedEventArgs> handler = FlashRequested;
+            if (handler == null)
+            {
+                return;
+            }
+
+            string wire = ReadFlashRequest();
+            if (wire == null)
+            {
+                // The slot was unreadable. Doing nothing is the right answer: the alternative
+                // is starting an endless flash the user cannot account for.
+                return;
+            }
+
+            if (string.Equals(wire, StopRequest, StringComparison.OrdinalIgnoreCase))
+            {
+                handler(this, new FlashRequestedEventArgs(null));
+                return;
+            }
+
+            FlashRequest request;
+            if (FlashRequest.TryParseWire(wire, out request))
+            {
+                handler(this, new FlashRequestedEventArgs(request));
             }
         }
 
@@ -107,6 +236,11 @@ namespace HideBootcampTrayUtility
             {
                 _showSettingsSignal.Close();
                 _showSettingsSignal = null;
+            }
+            if (_flashSignal != null)
+            {
+                _flashSignal.Close();
+                _flashSignal = null;
             }
             if (_stopSignal != null)
             {

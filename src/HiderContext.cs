@@ -21,29 +21,40 @@ namespace HideBootcampTrayUtility
         private readonly Backlight _backlight;
         private readonly HotkeyWorker _worker;
         private readonly BacklightIdle _idle;
+        private readonly FlashWorker _flash;
         private readonly SynchronizationContext _ui;
 
         private MessageSink _sink;
         private SettingsForm _form;
         private string _driverStatus = "";
 
-        public HiderContext(SingleInstance instance, bool showSettings)
+        public HiderContext(SingleInstance instance, bool showSettings, FlashRequest openingFlash)
         {
             _instance = instance;
             _backlight = new Backlight();
             _worker = new HotkeyWorker(_backlight);
             _idle = new BacklightIdle(_backlight);
+            _flash = new FlashWorker(_backlight);
 
             // Captured here, on the UI thread, because the listener fires on its own thread
             // and forms may only be touched from this one.
             _ui = SynchronizationContext.Current;
             _instance.ShowSettingsRequested += OnShowSettingsRequested;
+            _instance.FlashRequested += OnFlashRequested;
 
             ApplyEnabledState();
 
             if (showSettings)
             {
                 ShowSettings();
+            }
+
+            if (openingFlash != null)
+            {
+                // A --flash that found nobody running started this process to do the flashing.
+                // Last, so the window above is already up: it is the only sign that a program
+                // with no tray icon has just taken up residence.
+                _flash.Start(openingFlash);
             }
         }
 
@@ -109,6 +120,21 @@ namespace HideBootcampTrayUtility
             _ui.Post(delegate { ShowSettings(); }, null);
         }
 
+        /// <summary>
+        /// Handled straight on the listener thread, unlike the settings window. Nothing here
+        /// touches a form, and going through the message loop would make the beacon hostage
+        /// to whatever has the UI thread -- including the settings window's own modal work.
+        /// </summary>
+        private void OnFlashRequested(object sender, FlashRequestedEventArgs e)
+        {
+            if (e.Request == null)
+            {
+                _flash.Stop();
+                return;
+            }
+            _flash.Start(e.Request);
+        }
+
         private void ShowSettings()
         {
             if (_form != null && !_form.IsDisposed)
@@ -148,9 +174,12 @@ namespace HideBootcampTrayUtility
             if (disposing)
             {
                 _instance.ShowSettingsRequested -= OnShowSettingsRequested;
+                _instance.FlashRequested -= OnFlashRequested;
                 ReleaseSink();
-                // Before the backlight is let go: stopping the idle timer is what brings
-                // the light back up if it happened to be faded out on the way here.
+                // Both before the backlight is let go, and the flasher before the idle timer:
+                // ending the beacon is what puts the light back to the level -- or the dim --
+                // it borrowed, and only then can stopping the idle timer undo that dim.
+                _flash.Dispose();
                 _idle.Dispose();
                 _worker.Dispose();
                 _backlight.Dispose();

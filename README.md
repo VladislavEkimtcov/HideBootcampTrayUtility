@@ -35,6 +35,50 @@ settings, so there is nothing to save:
 - **Stop tray utility** — ends it. Apple gives it no exit command, no close, no quit, so
   this is the only way out short of Task Manager.
 
+## Flashing the backlight from the command line
+
+A program that is already resident with the SMC device open can do something a script
+cannot: pulse the keyboard backlight for as long as it takes for somebody to come back to
+the desk. That is what `--flash` is for — you leave an agent running, walk off, and the
+keyboard fetches you when it is done.
+
+```
+HideBootcampTrayUtility.exe --flash [--flash-device keyboard]
+                                    [--duration <seconds>|BackAtKeyboard]
+                                    [--flash-mode sweep|strobe]
+HideBootcampTrayUtility.exe --flash-stop
+```
+
+| Switch | Values | Default |
+|---|---|---|
+| `--flash-device` | `keyboard` | `keyboard` |
+| `--duration` | whole seconds, or `BackAtKeyboard` | `BackAtKeyboard` |
+| `--flash-mode` | `sweep` (smooth) or `strobe` (blink) | `sweep` |
+
+The light sweeps between off and full, and goes back to exactly the level it was found at
+— including staying dark, if the idle timer had already faded it out. Touching the
+keyboard or the mouse ends the flash, so `BackAtKeyboard` is not really "forever": it is
+"until you are here". A numeric duration is a ceiling on the same thing rather than a
+promise to keep flashing, because a light you cannot switch off by touching the keyboard
+is a light you come to hate.
+
+The command returns immediately and never blocks the caller: it hands the request to the
+running copy over an event plus an `HKCU` slot and exits. If no copy is running it starts
+one — with its settings window up, since with no tray icon that window is the only sign
+that a program has just taken up residence — and that copy does the flashing.
+
+`--flash-device` is there for the sake of having the parameter. This program has no
+control over screen brightness at all: it only tells Apple's keyboard driver that ACPI
+brightness exists so that F1 and F2 work, which is a different thing. `screen` and `both`
+are refused rather than quietly turned into a keyboard flash.
+
+Exit codes are `0` for done, `2` for bad arguments (the reason goes to stderr, via a
+console borrowed from the caller — a WinExe has none of its own) and `5` if a copy could
+not be started.
+
+There is a `/flash` skill in `~/.claude/skills/flash/` that tells an agent how and when to
+use this.
+
 ## Building
 
 ```
@@ -147,7 +191,7 @@ carries it would mean disassembling `KeyMagic.sys`.
 
 | Where | What |
 | --- | --- |
-| `HKCU\Software\HideBootcampTrayUtility` | `Enabled` |
+| `HKCU\Software\HideBootcampTrayUtility` | `Enabled`, and `FlashRequest` — the slot a `--flash` leaves its arguments in for the running copy to read |
 | `HKCU\...\CurrentVersion\Run` | `HideBootcampTrayUtility`, when auto-start is on |
 | `HKCU\...\Explorer\StartupApproved\Run` | the Startup-tab switch for its own entry |
 | `HKLM\...\Explorer\StartupApproved\Run` | the Startup-tab switch for `Apple_KbdMgr`, elevated |

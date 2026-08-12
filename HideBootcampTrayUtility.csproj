@@ -73,6 +73,8 @@
     <Compile Include="src\HotkeyWorker.cs" />
     <Compile Include="src\Backlight.cs" />
     <Compile Include="src\BacklightIdle.cs" />
+    <Compile Include="src\FlashRequest.cs" />
+    <Compile Include="src\FlashWorker.cs" />
     <Compile Include="src\MessageSink.cs" />
     <Compile Include="src\NativeMethods.cs" />
     <Compile Include="src\SingleInstance.cs" />

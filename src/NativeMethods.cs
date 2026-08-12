@@ -113,6 +113,25 @@ namespace HideBootcampTrayUtility
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool CloseHandle(IntPtr handle);
 
+        /// <summary>Borrow the console of whatever started this process, if it had one.</summary>
+        private const uint AttachParentProcess = 0xFFFFFFFF;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AttachConsole(uint processId);
+
+        /// <summary>
+        /// Attaches to the caller's console so the command-line switches can answer back.
+        ///
+        /// This is a WinExe -- it has no console of its own, and without this every message
+        /// it writes goes nowhere, which is a poor way to tell an agent it mistyped a switch.
+        /// Returns false when there was no console to attach to, which is the normal case for
+        /// a launch from Explorer or from the Run key.
+        /// </summary>
+        public static bool AttachParentConsole()
+        {
+            return AttachConsole(AttachParentProcess);
+        }
+
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags,
             UIntPtr extraInfo);
