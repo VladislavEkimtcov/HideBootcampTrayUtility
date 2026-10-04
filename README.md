@@ -53,7 +53,7 @@ HideBootcampTrayUtility.exe --flash-stop
 | Switch | Values | Default |
 |---|---|---|
 | `--flash-device` | `keyboard` | `keyboard` |
-| `--duration` | whole seconds, or `BackAtKeyboard` | `BackAtKeyboard` |
+| `--duration` | whole seconds (at most 120), or `BackAtKeyboard` | `BackAtKeyboard` |
 | `--flash-mode` | `sweep` (smooth) or `strobe` (blink) | `sweep` |
 
 The light sweeps between off and full, and goes back to exactly the level it was found at
@@ -62,6 +62,13 @@ keyboard or the mouse ends the flash, so `BackAtKeyboard` is not really "forever
 "until you are here". A numeric duration is a ceiling on the same thing rather than a
 promise to keep flashing, because a light you cannot switch off by touching the keyboard
 is a light you come to hate.
+
+No flash runs for more than **two minutes**, whatever was asked for: `BackAtKeyboard`
+means "until you are here, or two minutes", and a longer `--duration` is cut to two
+minutes. A flash is about 33 SMC writes a second through Apple's driver, which knows
+nothing about other programs using the SMC; a long one makes it likely that another
+program's transaction lands in the middle of ours and leaves the SMC unresponsive to
+everything until a power cycle. The ceiling is `FlashWorker.MaxFlashSeconds`.
 
 The command returns immediately and never blocks the caller: it hands the request to the
 running copy over an event plus an `HKCU` slot and exits. If no copy is running it starts

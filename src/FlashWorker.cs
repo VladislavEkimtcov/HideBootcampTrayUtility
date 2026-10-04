@@ -32,6 +32,20 @@ namespace HideBootcampTrayUtility
         private const int StepMilliseconds = 30;
 
         /// <summary>
+        /// The longest any one beacon may run, whatever it asked for -- including
+        /// BackAtKeyboard, and a --duration larger than this.
+        ///
+        /// A flash is about 33 SMC writes a second through MacHALDriver, and that driver
+        /// does not know about anybody else using the SMC. Left running for an hour it is
+        /// a standing invitation for another program's transaction to land in the middle of
+        /// one of ours: the SMC is then left with its input buffer closed, rejects every
+        /// command from every process (this program's restore-the-level write included, so
+        /// the light is stranded at full) and only a power cycle clears it. A beacon is for
+        /// getting somebody's attention, and two minutes either does that or it will not.
+        /// </summary>
+        public const int MaxFlashSeconds = 120;
+
+        /// <summary>
         /// How long the beacon runs before input is allowed to stop it. Without this a flash
         /// fired from a terminal the user is still typing in could cancel itself before they
         /// ever saw it -- and GetLastInputInfo answering "0" for any reason would cancel every
@@ -136,7 +150,7 @@ namespace HideBootcampTrayUtility
             }
 
             int startTick = Environment.TickCount;
-            long limitMilliseconds = (long)request.DurationSeconds * 1000;
+            long limitMilliseconds = LimitMilliseconds(request.DurationSeconds);
 
             try
             {
@@ -147,8 +161,9 @@ namespace HideBootcampTrayUtility
                     // A duration is a ceiling, not a contract: whichever comes first, the
                     // clock running out or the user sitting back down, ends the beacon. It
                     // has done its job either way, and a flash you cannot stop by touching
-                    // the keyboard is a flash you come to resent.
-                    if (limitMilliseconds > 0 && elapsed >= limitMilliseconds)
+                    // the keyboard is a flash you come to resent. There is always a clock:
+                    // "until somebody touches the machine" still stops at MaxFlashSeconds.
+                    if (elapsed >= limitMilliseconds)
                     {
                         break;
                     }
@@ -173,6 +188,19 @@ namespace HideBootcampTrayUtility
                 // level they left.
                 _backlight.EndFlash();
             }
+        }
+
+        /// <summary>
+        /// How long a beacon may run: what was asked for, but never more than
+        /// MaxFlashSeconds. Zero is how BackAtKeyboard travels, and means "as long as
+        /// allowed" -- there is no request that gets an unbounded flash.
+        /// </summary>
+        private static long LimitMilliseconds(int requestedSeconds)
+        {
+            int seconds = (requestedSeconds <= 0 || requestedSeconds > MaxFlashSeconds)
+                ? MaxFlashSeconds
+                : requestedSeconds;
+            return (long)seconds * 1000;
         }
 
         /// <summary>
