@@ -63,12 +63,38 @@ keyboard or the mouse ends the flash, so `BackAtKeyboard` is not really "forever
 promise to keep flashing, because a light you cannot switch off by touching the keyboard
 is a light you come to hate.
 
-No flash runs for more than **two minutes**, whatever was asked for: `BackAtKeyboard`
-means "until you are here, or two minutes", and a longer `--duration` is cut to two
-minutes. A flash is about 33 SMC writes a second through Apple's driver, which knows
-nothing about other programs using the SMC; a long one makes it likely that another
-program's transaction lands in the middle of ours and leaves the SMC unresponsive to
-everything until a power cycle. The ceiling is `FlashWorker.MaxFlashSeconds`.
+A flash is a sustained stream of SMC writes through Apple's driver, which knows nothing
+about other programs using the SMC. If one of those writes lands in the middle of another
+program's transaction, the SMC is left unresponsive to everything until a power cycle
+(this has happened twice: every fan and temperature read, and the backlight, failed at
+once). So flashing is fenced in several ways:
+
+- **One flash at a time.** A new `--flash` replaces the one running, never joins it. If
+  the old flasher cannot be stopped (it is stuck inside the driver), the new request is
+  dropped rather than putting a second thread on the SMC.
+- **No flash runs for more than two minutes**, whatever was asked for: `BackAtKeyboard`
+  means "until you are here, or two minutes", and a longer `--duration` is cut to two
+  minutes (`FlashWorker.MaxFlashSeconds`).
+- **No more than three minutes of flashing in any ten** (`FlashWorker.BudgetSeconds`,
+  `BudgetWindowSeconds`). A script that fires beacons in a loop gets the first three
+  minutes and then the light is left alone; a flash that would overrun is cut short to what
+  is left, and one with under three seconds left is not started. A refused flash is
+  silent: the command still exits `0`, because it only hands the request over.
+- **Every write is taken under `Global\AppleSmcAccess`**, the named mutex RPMac and its
+  `smccore` helper hold for each SMC transaction. If another program has it, the write is
+  skipped (a missing frame of a beacon is invisible); it is never interleaved. If the
+  mutex cannot be created at all, writes go ahead without it and the other fences remain.
+- **A dead SMC is left alone.** A write that fails, or takes over 250 ms (a healthy one
+  takes a few), counts against the SMC; two in a row stop all backlight writes for 5 s,
+  doubling up to 5 minutes for each failed probe afterwards, and a flash ends the moment
+  that happens. No flash starts while the SMC is backing off. Without this a flash against
+  a wedged SMC pins a core inside Apple's driver for as long as it runs: the two-minute
+  ceiling cannot interrupt a write that never returns.
+- **Fewer writes.** At most 20 a second (50 ms steps), and a step that would not visibly
+  change the light is skipped, so a strobe writes twice per blink rather than every step.
+
+All of it except the two ceilings lives in `SmcGuard` and `Backlight`, so it covers the
+hotkeys and the idle fade as well as the flash.
 
 The command returns immediately and never blocks the caller: it hands the request to the
 running copy over an event plus an `HKCU` slot and exits. If no copy is running it starts

@@ -57,19 +57,53 @@ namespace HideBootcampTrayUtility
         private const int FadeSteps = 32;
         private const int FadeStepMilliseconds = 30;
 
+        // A beacon does not write a level that is within this of the one already on the
+        // light: nobody can see 32 parts in 4096, and a strobe holding dark for half a second
+        // would otherwise write the same zero fifteen times. Fewer writes is fewer chances
+        // for one to land in the middle of somebody else's SMC transaction.
+        private const int FlashMinimumDelta = 32;
+
+        // The write that ends a ramp is retried this many times, this far apart, when it was
+        // skipped because another program was talking to the SMC.
+        private const int SettleAttempts = 5;
+        private const int SettleRetryMilliseconds = 40;
+
         private readonly object _sync = new object();
+        private readonly SmcGuard _guard;
 
         private IntPtr _device = NativeMethods.InvalidHandleValue;
         private bool _deviceTried;
         private int _uiStep;
         private int _currentLevel;
+        private int _lastFlashWrite = -1;
         private bool _dimmed;
         private bool _flashing;
 
+        // Stands in for \\.\MacHALDriver in a test, so the guard and the flasher can be driven
+        // without touching the real SMC. Null in the program.
+        private readonly Func<int, bool> _testSetter;
+
         public Backlight()
         {
+            _guard = new SmcGuard();
             _uiStep = ReadUiStep();
             _currentLevel = ToHardwareLevel(_uiStep);
+        }
+
+        internal Backlight(Func<int, bool> testSetter, string testMutexName)
+            : this()
+        {
+            _testSetter = testSetter;
+            _guard = new SmcGuard(testMutexName);
+        }
+
+        /// <summary>
+        /// True while the SMC has stopped answering and no writes are being attempted. A
+        /// flash asked for now would only spin against a dead SMC, so none is started.
+        /// </summary>
+        public bool SmcBackingOff
+        {
+            get { return _guard.IsBackingOff; }
         }
 
         /// <summary>Whether the light is currently down because the machine was left alone.</summary>
@@ -192,6 +226,7 @@ namespace HideBootcampTrayUtility
                     return false;
                 }
                 _flashing = true;
+                _lastFlashWrite = -1;
                 return true;
             }
         }
@@ -202,7 +237,12 @@ namespace HideBootcampTrayUtility
         /// not a level the user chose, and Boot Camp must not come back to find its stored
         /// value halfway through a sweep.
         /// </summary>
-        public void FlashSet(int hardwareLevel)
+        /// <returns>
+        /// False when the beacon should end: somebody has taken the light back, or the SMC
+        /// has stopped answering. A step that was merely skipped -- unchanged level, or
+        /// another program mid-transaction -- is still true.
+        /// </returns>
+        public bool FlashSet(int hardwareLevel)
         {
             if (hardwareLevel < 0)
             {
@@ -217,13 +257,22 @@ namespace HideBootcampTrayUtility
             {
                 if (!_flashing)
                 {
-                    // Somebody else has taken the light back -- a hotkey, most likely. The
-                    // flasher thread will notice on its next pass; until it does, stop
+                    // Somebody else has taken the light back -- a hotkey, most likely. Stop
                     // writing over what they did.
-                    return;
+                    return false;
                 }
-                Write(hardwareLevel);
-                _currentLevel = hardwareLevel;
+
+                if (_lastFlashWrite >= 0 && Math.Abs(hardwareLevel - _lastFlashWrite) < FlashMinimumDelta)
+                {
+                    return true;
+                }
+
+                if (Write(hardwareLevel))
+                {
+                    _lastFlashWrite = hardwareLevel;
+                    _currentLevel = hardwareLevel;
+                }
+                return !_guard.IsBackingOff;
             }
         }
 
@@ -252,28 +301,73 @@ namespace HideBootcampTrayUtility
             for (int step = 1; step <= steps; step++)
             {
                 Write(from + ((target - from) * step / steps));
+                if (_guard.IsBackingOff)
+                {
+                    // The SMC stopped answering mid-ramp. The rest of the steps would each
+                    // be skipped after sleeping; leave the light where it got to.
+                    return;
+                }
                 Thread.Sleep(millisecondsPerStep);
             }
-            // Written once more without the rounding of the interpolation above.
-            Write(target);
-            _currentLevel = target;
+            // Written once more without the rounding of the interpolation above. This is the
+            // write that decides where the light is left, so unlike the steps it is worth a
+            // few retries if another program was mid-transaction.
+            if (WriteSettled(target))
+            {
+                _currentLevel = target;
+            }
         }
 
         /// <summary>
-        /// Writes the SMC key. The device is opened on first use and kept -- opening it per
-        /// keypress would put a CreateFile in the middle of every ramp step.
+        /// Like Write, but if the write was only skipped because another program held the SMC
+        /// it tries again a moment later. Gives up at once if the SMC has stopped answering
+        /// or there is no driver, and after a handful of tries otherwise.
         /// </summary>
-        private void Write(int level)
+        private bool WriteSettled(int level)
         {
+            for (int attempt = 0; attempt < SettleAttempts; attempt++)
+            {
+                if (Write(level))
+                {
+                    return true;
+                }
+                if (_guard.IsBackingOff
+                    || (_testSetter == null && _device == NativeMethods.InvalidHandleValue))
+                {
+                    return false;
+                }
+                Thread.Sleep(SettleRetryMilliseconds);
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Writes the SMC key, through the guard that serialises it with other programs and
+        /// stands down when the SMC is not answering. The device is opened on first use and
+        /// kept -- opening it per keypress would put a CreateFile in the middle of every
+        /// ramp step.
+        /// </summary>
+        /// <returns>True if the write reached the SMC and was acknowledged.</returns>
+        private bool Write(int level)
+        {
+            if (_testSetter != null)
+            {
+                return _guard.Write(delegate { return _testSetter(level); });
+            }
+
             if (_device == NativeMethods.InvalidHandleValue && !_deviceTried)
             {
                 _deviceTried = true;
                 _device = NativeMethods.OpenDevice(@"\\.\MacHALDriver");
             }
-            if (_device != NativeMethods.InvalidHandleValue)
+            if (_device == NativeMethods.InvalidHandleValue)
             {
-                NativeMethods.SetBacklight(_device, level);
+                // No driver at all is not the SMC misbehaving, and not something to back off.
+                return false;
             }
+
+            IntPtr device = _device;
+            return _guard.Write(delegate { return NativeMethods.SetBacklight(device, level); });
         }
 
         private static int ToHardwareLevel(int uiStep)
@@ -340,6 +434,7 @@ namespace HideBootcampTrayUtility
                     NativeMethods.CloseHandle(_device);
                     _device = NativeMethods.InvalidHandleValue;
                 }
+                _guard.Dispose();
             }
         }
     }

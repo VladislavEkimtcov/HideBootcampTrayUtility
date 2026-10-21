@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace HideBootcampTrayUtility
@@ -26,24 +27,44 @@ namespace HideBootcampTrayUtility
         private const int StrobeOnMilliseconds = 200;
         private const int StrobeOffMilliseconds = 500;
 
-        // One SMC write every 30 ms, so about 33 a second. Boot Camp's own ramp writes 8 in
-        // 96 ms, so this is the same order of traffic, just sustained; and at 4096 hardware
-        // levels a 30 ms step is far finer than the eye resolves in a moving light.
-        private const int StepMilliseconds = 30;
+        // At most one SMC write every 50 ms, so 20 a second, and fewer in practice because
+        // Backlight skips a step that would not visibly change the light (a strobe writes
+        // twice per blink, not once per step). Boot Camp's own ramp writes 8 in 96 ms, so
+        // this is the same order of traffic, just sustained; and a 50 ms step is still far
+        // finer than the eye resolves in a moving light.
+        private const int StepMilliseconds = 50;
 
         /// <summary>
         /// The longest any one beacon may run, whatever it asked for -- including
         /// BackAtKeyboard, and a --duration larger than this.
         ///
-        /// A flash is about 33 SMC writes a second through MacHALDriver, and that driver
+        /// A flash is a sustained stream of SMC writes through MacHALDriver, and that driver
         /// does not know about anybody else using the SMC. Left running for an hour it is
         /// a standing invitation for another program's transaction to land in the middle of
         /// one of ours: the SMC is then left with its input buffer closed, rejects every
         /// command from every process (this program's restore-the-level write included, so
         /// the light is stranded at full) and only a power cycle clears it. A beacon is for
         /// getting somebody's attention, and two minutes either does that or it will not.
+        ///
+        /// This is a clock, not a guard: it is only looked at between writes, so it cannot
+        /// end a write that is itself stuck. That is SmcGuard's job -- it serialises the
+        /// writes with other programs, and stops them altogether once the SMC stops answering.
         /// </summary>
         public const int MaxFlashSeconds = 120;
+
+        /// <summary>
+        /// The most flashing allowed in any BudgetWindowSeconds, however it is asked for. A
+        /// script that fires a beacon in a loop gets the first few minutes of it and then
+        /// the light is left alone: every flash is hundreds of SMC writes, and the SMC is
+        /// shared with the fan controller. A flash that would overrun the budget is cut
+        /// short to what is left, and one with almost nothing left is not started.
+        /// </summary>
+        public const int BudgetSeconds = 180;
+        public const int BudgetWindowSeconds = 600;
+
+        // With less than this of the budget left a beacon would be cut too short to be seen,
+        // so it is not started. (A short flash that was asked for is another matter: it runs.)
+        private const int MinimumFlashMilliseconds = 3000;
 
         /// <summary>
         /// How long the beacon runs before input is allowed to stop it. Without this a flash
@@ -66,6 +87,13 @@ namespace HideBootcampTrayUtility
         private ManualResetEvent _stop;
         private bool _disposed;
 
+        // A flasher that Stop could not get to finish: stuck inside a driver call. While it
+        // is alive no other flasher starts, so there is never more than one thread writing.
+        private Thread _unfinished;
+
+        // When each recent flash ended and how long it ran, newest last, for the budget.
+        private readonly List<FlashSpan> _recent = new List<FlashSpan>();
+
         public FlashWorker(Backlight backlight)
         {
             _backlight = backlight;
@@ -74,7 +102,11 @@ namespace HideBootcampTrayUtility
         /// <summary>
         /// Starts flashing, replacing whatever was flashing before. A second request landing
         /// mid-beacon means the newer one is what the user wants to see, so the old thread is
-        /// stopped and joined first and the two never drive the light at once.
+        /// stopped and joined first and the two never drive the light at once -- and if the
+        /// old one will not finish, the new one does not start at all.
+        ///
+        /// Nothing starts, silently, while the SMC is not answering, or once the flash
+        /// budget for the last few minutes is spent.
         /// </summary>
         public void Start(FlashRequest request)
         {
@@ -92,8 +124,29 @@ namespace HideBootcampTrayUtility
                     return;
                 }
 
+                if (_unfinished != null)
+                {
+                    if (_unfinished.IsAlive)
+                    {
+                        return;
+                    }
+                    _unfinished = null;
+                }
+
+                if (_backlight.SmcBackingOff)
+                {
+                    return;
+                }
+
+                long budgetLeft = BudgetLeftMilliseconds();
+                if (budgetLeft < MinimumFlashMilliseconds)
+                {
+                    return;
+                }
+
                 Session session = new Session();
                 session.Request = request;
+                session.LimitMilliseconds = Math.Min(LimitMilliseconds(request.DurationSeconds), budgetLeft);
                 session.Stop = new ManualResetEvent(false);
 
                 _stop = session.Stop;
@@ -136,6 +189,53 @@ namespace HideBootcampTrayUtility
             {
                 stop.Close();
             }
+            else
+            {
+                // Stuck in a driver call. Remembered so that Start will not put a second
+                // thread beside it; the event is left open for it to find when it wakes.
+                lock (_sync)
+                {
+                    _unfinished = thread;
+                }
+            }
+        }
+
+        /// <summary>
+        /// How much of the budget is left for a flash starting now. Callers hold _sync.
+        /// </summary>
+        private long BudgetLeftMilliseconds()
+        {
+            long now = SmcGuard.NowMilliseconds();
+            long windowStart = now - (long)BudgetWindowSeconds * 1000;
+            long spent = 0;
+
+            for (int i = _recent.Count - 1; i >= 0; i--)
+            {
+                FlashSpan span = _recent[i];
+                if (span.EndedAt <= windowStart)
+                {
+                    _recent.RemoveAt(i);
+                    continue;
+                }
+
+                // A flash that ended inside the window but began before it only counts for
+                // the part that is inside.
+                long inside = Math.Min(span.Duration, span.EndedAt - windowStart);
+                spent += inside;
+            }
+
+            return Math.Max(0, (long)BudgetSeconds * 1000 - spent);
+        }
+
+        private void RecordFlash(long durationMilliseconds)
+        {
+            lock (_sync)
+            {
+                FlashSpan span = new FlashSpan();
+                span.EndedAt = SmcGuard.NowMilliseconds();
+                span.Duration = durationMilliseconds;
+                _recent.Add(span);
+            }
         }
 
         private void Run(object state)
@@ -150,7 +250,7 @@ namespace HideBootcampTrayUtility
             }
 
             int startTick = Environment.TickCount;
-            long limitMilliseconds = LimitMilliseconds(request.DurationSeconds);
+            long limitMilliseconds = session.LimitMilliseconds;
 
             try
             {
@@ -173,7 +273,12 @@ namespace HideBootcampTrayUtility
                         break;
                     }
 
-                    _backlight.FlashSet(LevelFor(request.Mode, elapsed));
+                    // False means the light was taken back or the SMC stopped answering;
+                    // either way the beacon is over, and a dead SMC is left alone.
+                    if (!_backlight.FlashSet(LevelFor(request.Mode, elapsed)))
+                    {
+                        break;
+                    }
 
                     if (stop.WaitOne(StepMilliseconds))
                     {
@@ -187,6 +292,7 @@ namespace HideBootcampTrayUtility
                 // process being shut down through Dispose, still hands the user back the
                 // level they left.
                 _backlight.EndFlash();
+                RecordFlash(ElapsedSince(startTick));
             }
         }
 
@@ -210,8 +316,11 @@ namespace HideBootcampTrayUtility
         /// </summary>
         private static bool InputSince(int elapsedMilliseconds)
         {
-            return NativeMethods.IdleMilliseconds() < elapsedMilliseconds - InputSlackMilliseconds;
+            return IdleProbe() < elapsedMilliseconds - InputSlackMilliseconds;
         }
+
+        // How long the machine has been idle; replaced in a test, which has no one to type.
+        internal static Func<int> IdleProbe = NativeMethods.IdleMilliseconds;
 
         /// <summary>
         /// Where in its waveform the beacon is, as a hardware level. Interpolation is done in
@@ -264,7 +373,15 @@ namespace HideBootcampTrayUtility
         private sealed class Session
         {
             public FlashRequest Request;
+            public long LimitMilliseconds;
             public ManualResetEvent Stop;
+        }
+
+        /// <summary>One finished flash, as the budget remembers it.</summary>
+        private struct FlashSpan
+        {
+            public long EndedAt;
+            public long Duration;
         }
     }
 }
